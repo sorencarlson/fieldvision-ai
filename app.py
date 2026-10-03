@@ -16,14 +16,44 @@ st.markdown("""
     .sub-header { font-size: 0.95rem; color: #6b7280; text-align: center; margin-bottom: 1.5rem; }
     .badge-occupied { background-color: #dcfce7; color: #15803d; padding: 3px 8px; border-radius: 4px; font-weight: bold; }
     .badge-vacant { background-color: #fee2e2; color: #b91c1c; padding: 3px 8px; border-radius: 4px; font-weight: bold; }
+    .photo-tag { 
+        background-color: #0f172a; 
+        color: #f8fafc; 
+        font-size: 0.75rem; 
+        font-weight: 600; 
+        text-align: center; 
+        padding: 4px 6px; 
+        border-radius: 4px; 
+        margin-top: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-header">FieldVision AI Inspector</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Automated Photo-to-Data Field Engine</div>', unsafe_allow_html=True)
 
-# 1. Strict Schema mapping directly to mortgage servicing requirements
+# 1. Pydantic Schemas
+PhotoLabel = Literal[
+    "Street Sign", 
+    "Street Scene", 
+    "Front Elevation", 
+    "House Number / Address", 
+    "Left Side", 
+    "Right Side", 
+    "Rear View", 
+    "Roof Detail", 
+    "Lawn / Yard", 
+    "Damage Detail", 
+    "Interior", 
+    "Other / Unclassified"
+]
+
 class InspectionAudit(BaseModel):
+    photo_classifications: List[PhotoLabel] = Field(
+        description="A list containing the exact visual label for each uploaded image in the exact order received."
+    )
     occupancy_status: Literal["Occupied", "Vacant", "Unknown"] = Field(
         description="Determine occupancy status based on visual evidence."
     )
@@ -45,10 +75,10 @@ class InspectionAudit(BaseModel):
     exterior_condition: Literal["Good", "Fair", "Poor"]
     exterior_damage_present: bool
     exterior_damage_details: Optional[str] = Field(
-        default="None", description="Specific details of any visible damage to roof, siding, gutters, or windows."
+        default="None", description="Specific details of visible damage to roof, siding, gutters, or windows."
     )
     interior_access_gained: bool = Field(
-        description="Set to true ONLY if photos show the inside of interior rooms. If photos show only an exterior door or hardware, set to false."
+        description="Set to true ONLY if photos show the interior rooms. Otherwise false."
     )
     occupied_comments: str = Field(
         description="Concise, factual 2-sentence narrative suitable for bank compliance audit."
@@ -60,7 +90,7 @@ if not api_key:
     with st.expander("API Configuration", expanded=True):
         api_key = st.text_input("Enter Gemini API Key", type="password")
 
-# 3. File Capture Interface
+# 3. Photo Capture & Preview
 uploaded_files = st.file_uploader(
     "Snap or upload 1 to 6 inspection photos", 
     type=["jpg", "jpeg", "png"], 
@@ -68,25 +98,27 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    cols = st.columns(min(len(uploaded_files), 4))
-    pil_images = []
-    for idx, f in enumerate(uploaded_files):
-        img = Image.open(f)
-        pil_images.append(img)
-        with cols[idx % 4]:
-            st.image(img, use_container_width=True)
+    pil_images = [Image.open(f) for f in uploaded_files]
+
+    # Pre-audit thumbnails
+    if "audit_data" not in st.session_state:
+        cols = st.columns(min(len(uploaded_files), 4))
+        for idx, img in enumerate(pil_images):
+            with cols[idx % 4]:
+                st.image(img, use_container_width=True)
 
     if st.button("RUN AUDIT (Extract Form Data)", type="primary", use_container_width=True):
         if not api_key:
             st.error("Please provide an API key to run analysis.")
         else:
-            with st.spinner("Analyzing photos with AI vision..."):
+            with st.spinner("Classifying photos and auditing property..."):
                 try:
                     client = genai.Client(api_key=api_key)
                     prompt = (
                         "You are an expert mortgage property field inspector. "
-                        "Analyze these photos of the subject property and extract all physical characteristics, "
-                        "occupancy indicators, construction styles, and damage. Be strictly factual."
+                        "1. For EVERY uploaded image in the exact order received, assign the most accurate photo label "
+                        "from the allowed list (Street Sign, Street Scene, Front Elevation, House Number / Address, etc.). "
+                        "2. Analyze all photos to extract occupancy indicators, structural details, and property condition."
                     )
                     
                     response = client.models.generate_content(
@@ -100,17 +132,29 @@ if uploaded_files:
                     )
                     
                     st.session_state["audit_data"] = json.loads(response.text)
-                    st.success("Analysis Complete!")
+                    st.session_state["cached_images"] = pil_images
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Inference error: {e}")
 
-# 4. Populated Verification Card
-if "audit_data" in st.session_state:
+# 4. Results Display
+if "audit_data" in st.session_state and "cached_images" in st.session_state:
     data = st.session_state["audit_data"]
+    images = st.session_state["cached_images"]
+    labels = data.get("photo_classifications", [])
+
+    st.markdown("### Labeled Photo Evidence")
+    labeled_cols = st.columns(min(len(images), 4))
+    for idx, img in enumerate(images):
+        with labeled_cols[idx % 4]:
+            st.image(img, use_container_width=True)
+            lbl = labels[idx] if idx < len(labels) else "Photo"
+            st.markdown(f'<div class="photo-tag">{lbl}</div>', unsafe_allow_html=True)
+
     st.divider()
-    
+
     status_class = "badge-occupied" if data["occupancy_status"] == "Occupied" else "badge-vacant"
-    st.markdown(f"### Results: <span class='{status_class}'>{data['occupancy_status'].upper()}</span>", unsafe_allow_html=True)
+    st.markdown(f"### Audit Verdict: <span class='{status_class}'>{data['occupancy_status'].upper()}</span>", unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
     with col1:
@@ -133,6 +177,7 @@ if "audit_data" in st.session_state:
 
     st.info(f"**Bank-Ready Narrative:**\n\n{data['occupied_comments']}")
 
-    if st.button("Confirm & Finalize Inspection", use_container_width=True):
-        st.balloons()
-        st.success("Inspection ready for PDF packaging!")
+    if st.button("Clear / Next Inspection", use_container_width=True):
+        del st.session_state["audit_data"]
+        del st.session_state["cached_images"]
+        st.rerun()
