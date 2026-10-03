@@ -6,10 +6,13 @@ from google import genai
 from google.genai import types
 import json
 import os
+import time
 
 st.set_page_config(page_title="FieldVision AI", layout="centered", initial_sidebar_state="collapsed")
 
-# Custom Field-Optimized Styling
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
+
 st.markdown("""
 <style>
     .main-header { font-size: 1.8rem; font-weight: 700; text-align: center; margin-bottom: 0.2rem; }
@@ -34,35 +37,36 @@ st.markdown("""
 st.markdown('<div class="main-header">FieldVision AI Inspector</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Automated Photo-to-Data Field Engine</div>', unsafe_allow_html=True)
 
-# 1. Pydantic Schemas
 PhotoLabel = Literal[
     "Street Sign", 
     "Street Scene", 
     "Front Elevation", 
     "House Number / Address", 
+    "Lockbox",
+    "Vacancy / Preservation Notice",
+    "Mailbox / Mail Overflow",
+    "Interior Thru Window (Bare/Empty)",
     "Left Side", 
     "Right Side", 
     "Rear View", 
     "Roof Detail", 
     "Lawn / Yard", 
     "Damage Detail", 
-    "Interior", 
+    "Interior Entry", 
     "Other / Unclassified"
 ]
 
 class InspectionAudit(BaseModel):
     photo_classifications: List[PhotoLabel] = Field(
-        description="A list containing the exact visual label for each uploaded image in the exact order received."
+        description="The exact visual label for each uploaded image in the exact order received."
     )
     occupancy_status: Literal["Occupied", "Vacant", "Unknown"] = Field(
-        description="Determine occupancy status based on visual evidence."
+        description="Must be Vacant if a lockbox, vacancy posting, uncollected mail, or empty interior seen through window is present."
     )
-    occupied_by: Literal["Owner", "Tenant", "Vagrant/Squatter", "Unknown"] = Field(
-        description="Inferred resident type based on property presentation."
-    )
+    occupied_by: Literal["Owner", "Tenant", "Vacant/None", "Vagrant/Squatter", "Unknown"]
     occupancy_determination_method: Literal["Visual", "Direct contact", "Other"]
     visual_indicators_found: List[str] = Field(
-        description="Select all visible indicators: Animals, Car, Decorations, Furniture, Mailbox, Lawn, People"
+        description="Detected tags: Empty Interior Seen Thru Window, Lockbox, Posting/Sticker, Mail Overflow, Mowed Lawn, Car, Furniture, Personal Property"
     )
     property_stories: Literal["1", "2", "3", "4", "5"]
     construction_type: Literal[
@@ -74,33 +78,32 @@ class InspectionAudit(BaseModel):
     property_for_sale: Literal["For sale by broker", "For sale by owner", "Not for sale"]
     exterior_condition: Literal["Good", "Fair", "Poor"]
     exterior_damage_present: bool
-    exterior_damage_details: Optional[str] = Field(
-        default="None", description="Specific details of visible damage to roof, siding, gutters, or windows."
-    )
+    exterior_damage_details: Optional[str] = Field(default="None")
     interior_access_gained: bool = Field(
-        description="Set to true ONLY if photos show the interior rooms. Otherwise false."
+        description="False if inspection was conducted from the exterior or peering through windows. True ONLY if doors were unlocked and physical entry gained."
+    )
+    interior_seen_empty: bool = Field(
+        description="True if window shots or interior photos reveal a bare/empty interior without personal furnishings."
     )
     occupied_comments: str = Field(
-        description="Concise, factual 2-sentence narrative suitable for bank compliance audit."
+        description="Factual 2-sentence mortgage audit summary citing visible evidence like through-window empty rooms, postings, or lockboxes."
     )
 
-# 2. Key Management
 api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 if not api_key:
     with st.expander("API Configuration", expanded=True):
         api_key = st.text_input("Enter Gemini API Key", type="password")
 
-# 3. Photo Capture & Preview
 uploaded_files = st.file_uploader(
-    "Snap or upload 1 to 6 inspection photos", 
+    "Snap or upload inspection photos", 
     type=["jpg", "jpeg", "png"], 
-    accept_multiple_files=True
+    accept_multiple_files=True,
+    key=f"uploader_{st.session_state['uploader_key']}"
 )
 
 if uploaded_files:
     pil_images = [Image.open(f) for f in uploaded_files]
 
-    # Pre-audit thumbnails
     if "audit_data" not in st.session_state:
         cols = st.columns(min(len(uploaded_files), 4))
         for idx, img in enumerate(pil_images):
@@ -112,32 +115,52 @@ if uploaded_files:
             st.error("Please provide an API key to run analysis.")
         else:
             with st.spinner("Classifying photos and auditing property..."):
-                try:
-                    client = genai.Client(api_key=api_key)
-                    prompt = (
-                        "You are an expert mortgage property field inspector. "
-                        "1. For EVERY uploaded image in the exact order received, assign the most accurate photo label "
-                        "from the allowed list (Street Sign, Street Scene, Front Elevation, House Number / Address, etc.). "
-                        "2. Analyze all photos to extract occupancy indicators, structural details, and property condition."
-                    )
-                    
-                    response = client.models.generate_content(
-                        model="gemini-3.8-flash",
-                        contents=[*pil_images, prompt],
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            response_schema=InspectionAudit,
-                            temperature=0.1
-                        )
-                    )
-                    
-                    st.session_state["audit_data"] = json.loads(response.text)
-                    st.session_state["cached_images"] = pil_images
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Inference error: {e}")
+                client = genai.Client(api_key=api_key)
+                prompt = (
+                    "You are an expert mortgage property field inspector analyzing photos for default servicing compliance.\n\n"
+                    "CORE INVENTORY & RULES:\n"
+                    "1. Classify EVERY uploaded image in order. Options: Street Sign, Street Scene, Front Elevation, House Number / Address, "
+                    "Lockbox, Vacancy / Preservation Notice, Mailbox / Mail Overflow, Interior Thru Window (Bare/Empty), Left Side, Right Side, Rear View, Lawn / Yard, Damage Detail, Interior Entry.\n"
+                    "2. VACANCY SIGNALS: If you see ANY of the following, the property is unequivocally VACANT:\n"
+                    "   - Bare/empty rooms viewed through windows (no furniture/belongings)\n"
+                    "   - A key lockbox mounted on a railing, doorknob, or gas meter\n"
+                    "   - Preservation/servicer warning sticker or posting (e.g. 'ATTENTION' notice)\n"
+                    "   - Overflowing/uncollected postal mail\n"
+                    "3. LAWN RULE: A mowed lawn NEVER indicates occupancy by itself, as mortgage servicers routinely maintain lawns on vacant assets.\n"
+                    "4. ACCESS: Peering through a window does NOT count as interior access gained (interior_access_gained = False, but interior_seen_empty = True)."
+                )
 
-# 4. Results Display
+                candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
+                audit_success = False
+                last_err = ""
+
+                for mod in candidate_models:
+                    for attempt in range(2):
+                        try:
+                            response = client.models.generate_content(
+                                model=mod,
+                                contents=[*pil_images, prompt],
+                                config=types.GenerateContentConfig(
+                                    response_mime_type="application/json",
+                                    response_schema=InspectionAudit,
+                                    temperature=0.1
+                                )
+                            )
+                            st.session_state["audit_data"] = json.loads(response.text)
+                            st.session_state["cached_images"] = pil_images
+                            audit_success = True
+                            break
+                        except Exception as e:
+                            last_err = str(e)
+                            time.sleep(1.0)
+                    if audit_success:
+                        break
+
+                if audit_success:
+                    st.rerun()
+                else:
+                    st.error(f"Inference error: {last_err}")
+
 if "audit_data" in st.session_state and "cached_images" in st.session_state:
     data = st.session_state["audit_data"]
     images = st.session_state["cached_images"]
@@ -162,7 +185,8 @@ if "audit_data" in st.session_state and "cached_images" in st.session_state:
         st.write(f"**Method:** {data['occupancy_determination_method']}")
         indicators = ", ".join(data["visual_indicators_found"]) if data["visual_indicators_found"] else "None detected"
         st.write(f"**Visual Tags:** {indicators}")
-        st.write(f"**Interior Access:** {'YES' if data['interior_access_gained'] else 'NO'}")
+        st.write(f"**Physical Interior Entry:** {'YES' if data['interior_access_gained'] else 'NO'}")
+        st.write(f"**Interior Verified Bare/Empty:** {'YES' if data.get('interior_seen_empty') else 'NO'}")
         
     with col2:
         st.write(f"**Stories:** {data['property_stories']}")
@@ -178,6 +202,7 @@ if "audit_data" in st.session_state and "cached_images" in st.session_state:
     st.info(f"**Bank-Ready Narrative:**\n\n{data['occupied_comments']}")
 
     if st.button("Clear / Next Inspection", use_container_width=True):
-        del st.session_state["audit_data"]
-        del st.session_state["cached_images"]
+        st.session_state["uploader_key"] += 1
+        st.session_state.pop("audit_data", None)
+        st.session_state.pop("cached_images", None)
         st.rerun()
