@@ -22,14 +22,14 @@ st.markdown("""
     .photo-tag { 
         background-color: #0f172a; 
         color: #f8fafc; 
-        font-size: 0.75rem; 
+        font-size: 0.70rem; 
         font-weight: 600; 
         text-align: center; 
         padding: 4px 6px; 
         border-radius: 4px; 
         margin-top: 4px;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.04em;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -45,14 +45,25 @@ PhotoLabel = Literal[
     "Lockbox",
     "Vacancy / Preservation Notice",
     "Mailbox / Mail Overflow",
-    "Interior Thru Window (Bare/Empty)",
     "Left Side", 
     "Right Side", 
-    "Rear View", 
+    "Rear Elevation / Deck", 
+    "HVAC / Compressor",
+    "Electric Meter / Utility",
+    "Gas Meter / Utility",
+    "Door Lock / Keyway",
+    "Interior Thru Window (Bare/Empty)",
+    "Interior - Foyer / Entry",
+    "Interior - Living Room",
+    "Interior - Fireplace Detail",
+    "Interior - Kitchen",
+    "Interior - Bedroom",
+    "Interior - Bathroom",
+    "Interior - Basement / Mechanical",
+    "Interior - Debris / Damage",
     "Roof Detail", 
     "Lawn / Yard", 
     "Damage Detail", 
-    "Interior Entry", 
     "Other / Unclassified"
 ]
 
@@ -61,12 +72,12 @@ class InspectionAudit(BaseModel):
         description="The exact visual label for each uploaded image in the exact order received."
     )
     occupancy_status: Literal["Occupied", "Vacant", "Unknown"] = Field(
-        description="Must be Vacant if a lockbox, vacancy posting, uncollected mail, or empty interior seen through window is present."
+        description="Must be Vacant if lockbox, servicer posting, or bare unfurnished interior is observed."
     )
     occupied_by: Literal["Owner", "Tenant", "Vacant/None", "Vagrant/Squatter", "Unknown"]
     occupancy_determination_method: Literal["Visual", "Direct contact", "Other"]
     visual_indicators_found: List[str] = Field(
-        description="Detected tags: Empty Interior Seen Thru Window, Lockbox, Posting/Sticker, Mail Overflow, Mowed Lawn, Car, Furniture, Personal Property"
+        description="Detected tags: Empty Interior, Lockbox, Posting/Sticker, Mail Overflow, Mowed Lawn, Electric Meter Present, HVAC Intact, Personal Property, Debris"
     )
     property_stories: Literal["1", "2", "3", "4", "5"]
     construction_type: Literal[
@@ -80,13 +91,14 @@ class InspectionAudit(BaseModel):
     exterior_damage_present: bool
     exterior_damage_details: Optional[str] = Field(default="None")
     interior_access_gained: bool = Field(
-        description="False if inspection was conducted from the exterior or peering through windows. True ONLY if doors were unlocked and physical entry gained."
+        description="True if photographs were captured inside the living spaces/rooms. False if curb/window only."
     )
-    interior_seen_empty: bool = Field(
-        description="True if window shots or interior photos reveal a bare/empty interior without personal furnishings."
-    )
+    interior_condition: Literal["Good", "Fair", "Poor", "Not Inspected"]
+    interior_debris_present: bool
+    electric_meter_installed: bool
+    hvac_exterior_unit_present: bool
     occupied_comments: str = Field(
-        description="Factual 2-sentence mortgage audit summary citing visible evidence like through-window empty rooms, postings, or lockboxes."
+        description="Factual 2-3 sentence mortgage audit summary highlighting exterior vacancy markers, utility presence, and empty interior status."
     )
 
 api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
@@ -95,7 +107,7 @@ if not api_key:
         api_key = st.text_input("Enter Gemini API Key", type="password")
 
 uploaded_files = st.file_uploader(
-    "Snap or upload inspection photos", 
+    "Snap or upload inspection photos (exterior, utilities, and interior)", 
     type=["jpg", "jpeg", "png"], 
     accept_multiple_files=True,
     key=f"uploader_{st.session_state['uploader_key']}"
@@ -114,20 +126,17 @@ if uploaded_files:
         if not api_key:
             st.error("Please provide an API key to run analysis.")
         else:
-            with st.spinner("Classifying photos and auditing property..."):
+            with st.spinner("Classifying comprehensive photo pack and auditing property..."):
                 client = genai.Client(api_key=api_key)
                 prompt = (
-                    "You are an expert mortgage property field inspector analyzing photos for default servicing compliance.\n\n"
-                    "CORE INVENTORY & RULES:\n"
-                    "1. Classify EVERY uploaded image in order. Options: Street Sign, Street Scene, Front Elevation, House Number / Address, "
-                    "Lockbox, Vacancy / Preservation Notice, Mailbox / Mail Overflow, Interior Thru Window (Bare/Empty), Left Side, Right Side, Rear View, Lawn / Yard, Damage Detail, Interior Entry.\n"
-                    "2. VACANCY SIGNALS: If you see ANY of the following, the property is unequivocally VACANT:\n"
-                    "   - Bare/empty rooms viewed through windows (no furniture/belongings)\n"
-                    "   - A key lockbox mounted on a railing, doorknob, or gas meter\n"
-                    "   - Preservation/servicer warning sticker or posting (e.g. 'ATTENTION' notice)\n"
-                    "   - Overflowing/uncollected postal mail\n"
-                    "3. LAWN RULE: A mowed lawn NEVER indicates occupancy by itself, as mortgage servicers routinely maintain lawns on vacant assets.\n"
-                    "4. ACCESS: Peering through a window does NOT count as interior access gained (interior_access_gained = False, but interior_seen_empty = True)."
+                    "You are an expert mortgage field inspector analyzing an entire photo pack for default loan servicing.\n\n"
+                    "RULES:\n"
+                    "1. Classify EVERY uploaded image in order. Use precise tags such as: Street Sign, Street Scene, Front Elevation, House Number / Address, "
+                    "Lockbox, Vacancy / Preservation Notice, Rear Elevation / Deck, Left Side, Right Side, HVAC / Compressor, Electric Meter / Utility, "
+                    "Door Lock / Keyway, Interior - Foyer / Entry, Interior - Living Room, Interior - Fireplace Detail, Interior - Kitchen, Interior - Bathroom, etc.\n"
+                    "2. OCCUPANCY: If you observe a lockbox, servicer vacancy posting, or empty interior rooms without furniture, the status MUST be VACANT.\n"
+                    "3. ACCESS: If interior rooms are photographed from inside the dwelling, mark interior_access_gained = True.\n"
+                    "4. UTILITIES & ASSETS: Note whether the exterior HVAC/compressor and electric meter are installed and intact."
                 )
 
                 candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
@@ -185,17 +194,19 @@ if "audit_data" in st.session_state and "cached_images" in st.session_state:
         st.write(f"**Method:** {data['occupancy_determination_method']}")
         indicators = ", ".join(data["visual_indicators_found"]) if data["visual_indicators_found"] else "None detected"
         st.write(f"**Visual Tags:** {indicators}")
-        st.write(f"**Physical Interior Entry:** {'YES' if data['interior_access_gained'] else 'NO'}")
-        st.write(f"**Interior Verified Bare/Empty:** {'YES' if data.get('interior_seen_empty') else 'NO'}")
+        st.write(f"**Interior Entry Gained:** {'YES' if data['interior_access_gained'] else 'NO'}")
+        st.write(f"**Interior Condition:** {data['interior_condition']}")
+        st.write(f"**Interior Debris/Hazards:** {'YES' if data['interior_debris_present'] else 'None'}")
         
     with col2:
         st.write(f"**Stories:** {data['property_stories']}")
         st.write(f"**Construction:** {data['construction_type']}")
         st.write(f"**Attached Garage:** {'Yes' if data['attached_garage_present'] else 'No'}")
-        st.write(f"**Pool / Water Feature:** {'Yes' if data['water_features_or_pool_present'] else 'No'}")
+        st.write(f"**HVAC Compressor Intact:** {'Yes' if data.get('hvac_exterior_unit_present') else 'No'}")
+        st.write(f"**Electric Meter Present:** {'Yes' if data.get('electric_meter_installed') else 'No'}")
         st.write(f"**Listing Status:** {data['property_for_sale']}")
 
-    st.write(f"**Condition:** {data['exterior_condition']} | **Damage:** {'YES' if data['exterior_damage_present'] else 'No visible damage'}")
+    st.write(f"**Exterior Condition:** {data['exterior_condition']} | **Damage:** {'YES' if data['exterior_damage_present'] else 'No visible damage'}")
     if data['exterior_damage_present']:
         st.warning(f"**Damage Identified:** {data['exterior_damage_details']}")
 
